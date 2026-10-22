@@ -858,6 +858,7 @@ h4.hd:first-child{margin-top:0}
   background:rgba(12,26,30,.96);border:1px solid #e0a95a;border-radius:10px;
   padding:7px 14px;color:#f0dfc0;font-size:14px;box-shadow:0 6px 18px rgba(0,0,0,.45)}
 #await .awh{font-weight:700;color:#e0a95a;margin-right:4px}
+#await .awh2{color:#9fb3b8;margin-left:2px}
 @media (max-width:900px){ #await .awin{font-size:12.5px;padding:6px 10px} }
 
 /* ================= БРИДЖ ================= */
@@ -5900,7 +5901,8 @@ var Net = (function () {
     try {
       localStorage.setItem('bridge-host', JSON.stringify({
         ts: Date.now(), code: S.code, cfg: S.cfg,
-        conns: S.conns.map(function (c) { return { seat: c.seat, name: c.name, key: c.key, face: c.face }; }),
+        conns: S.conns.map(function (c) { return { seat: c.seat, name: c.name, key: c.key, face: c.face,
+          bot: !!c.bot && !c.away, uid: c.uid || null }; }),
         chars: g.chars || null, faces: g.faces || null,
         game: Engine.snapshot(g)
       }));
@@ -5908,7 +5910,9 @@ var Net = (function () {
   }
   /* Запись живёт полсуток: код стола после этого всё равно мёртвый —
      хозяин давно закрыл вкладку, и кнопка вела бы в никуда. */
-  var BACK_TTL = 12 * 3600 * 1000;
+  /* [stated] Ник 22.10.2026: партию можно отложить и доиграть потом —
+     поэтому и «Вернуться за стол», и сохранённый стол живут месяц. */
+  var BACK_TTL = 30 * 24 * 3600 * 1000;
   function savedBack() {
     try {
       var d = JSON.parse(LS('bridge-back') || 'null');
@@ -5923,7 +5927,7 @@ var Net = (function () {
     try {
       var d = JSON.parse(localStorage.getItem('bridge-host') || 'null');
       if (!d || !d.code || !d.game) return null;
-      if (Date.now() - d.ts > 36 * 3600 * 1000) return null;   // старше полутора суток — не предлагаем
+      if (Date.now() - d.ts > BACK_TTL) return null;          // старше месяца — не предлагаем
       return d;
     } catch (e) { return null; }
   }
@@ -5960,7 +5964,9 @@ var Net = (function () {
           S.conns[i].key = fixed.conns[i].key || S.conns[i].key;
           S.conns[i].name = fixed.conns[i].name || S.conns[i].name;
           if (fixed.conns[i].face != null) S.conns[i].face = fixed.conns[i].face;
-          S.conns[i].bot = i !== 0;
+          /* старые записи без отметки — как раньше, боты; новые помнят людей */
+          S.conns[i].bot = i !== 0 && (fixed.conns[i].bot === undefined || !!fixed.conns[i].bot);
+          if (i !== 0 && fixed.conns[i].uid) S.conns[i].uid = fixed.conns[i].uid;
         }
       LS('bridge-room', S.code);
       /* Поднять стол с первого раза выходит не всегда: публичный брокер
@@ -6025,8 +6031,6 @@ var Net = (function () {
      может не ждать — в той же плашке кнопка «посадить бота».
 
      В лобби ждать нечего: партия не началась, место просто пустеет. */
-  var AWAY_GRACE = function () { return T.away; };
-
   function markAway(i, onState) {
     var c = S.conns[i];
     if (!c) return;
@@ -6037,7 +6041,9 @@ var Net = (function () {
       if (UI && UI.toast) UI.toast((c.name || 'Игрок') + ' ушёл из-за стола');
       return;
     }
-    c.away = Date.now() + AWAY_GRACE();
+    /* Помечаем МОМЕНТ обрыва, а не срок: бот сам на место не садится
+       (та же починка, что в клаборе и преферансе 22.10.2026). */
+    c.away = Date.now();
     c.bot = false;
     if (UI && UI.toast) UI.toast((c.name || 'Игрок') + ' без связи — ждём его, партия на паузе');
     lobbyPush(); onState && onState();
@@ -6059,7 +6065,8 @@ var Net = (function () {
       if (c && c.away)
         out.push({
           seat: i, name: c.name || ('Место ' + (i + 1)),
-          left: Math.max(0, c.away - now)
+          /* сколько УЖЕ ждём — обратного отсчёта нет, бота сажает человек */
+          since: Math.max(0, now - c.away)
         });
     }
     return out;
@@ -6070,9 +6077,12 @@ var Net = (function () {
     toGuests({ t: 'away', list: list });
     if (UI && UI.netAway) UI.netAway(list);
   }
-  /* Ждать больше нечего: место забирает бот. Сюда приходят двумя
-     путями — вышло время или хозяин нажал кнопку. Бота сажаем ПОСЛЕ
-     того, как снята пауза: иначе его первый ход упрётся в неё же. */
+  /* Место забирает бот. Путь сюда ОДИН: хозяин нажал «посадить бота»
+     в плашке ожидания. [stated] Ник 22.10.2026: «бот садится, только если
+     его посадит игрок, а не автоматом» — раньше через 45 секунд бот
+     садился сам, и человек, чинивший вай-фай, возвращался к тому, что
+     его картами уже играют. Бота сажаем ПОСЛЕ того, как снята пауза:
+     иначе его первый ход упрётся в неё же. */
   function seatBot(i) {
     if (!S.host) return false;
     var c = S.conns[i];
@@ -6521,6 +6531,43 @@ var Net = (function () {
     leave();
   }
 
+  /* ---------- отложить партию ----------
+     [stated] Ник 22.10.2026: «игра сохраняется — недоигранная партия
+     записывается хозяину стола; её можно закрыть и потом продолжить».
+     Запись уже лежит (saveHost на каждом ходе). Здесь хозяин закрывает
+     стол, НЕ стирая её, и вежливо прощается с гостями — иначе они
+     бесконечно стучались бы обратно. У гостей остаётся кнопка
+     «Вернуться за стол»: когда хозяин поднимет стол, они сядут на свои
+     места по ключу и номеру игрока. */
+  function postpone() {
+    if (!S.on) return;
+    if (S.host) {
+      if (S.game) saveHost(S.game);
+      for (var i = 1; i < S.conns.length; i++) {
+        var c = S.conns[i];
+        if (c && c.conn) send(c.conn, { t: 'bye', later: true,
+          why: 'Хозяин отложил партию. Доиграете потом: «Вернуться за стол» в главном меню, когда он снова поднимет стол.' });
+      }
+      // прощание уходит по проводу — рвём связь не в ту же миллисекунду
+      setTimeout(leave, 400);
+      return;
+    }
+    leave();
+  }
+  /* Поднятый стол: места людей не отдаём ботам, а ждём их — как при
+     обрыве. Вернулся — сел на своё место; не вернулся — хозяин сам
+     решает, сажать ли бота (кнопка в плашке). */
+  function holdHumans() {
+    if (!S.host) return 0;
+    var n = 0;
+    for (var i = 1; i < S.conns.length; i++) {
+      var c = S.conns[i];
+      if (c && !c.bot && !c.conn) { c.away = Date.now(); n++; }
+    }
+    if (n) { lobbyPush(); awayPush(); }
+    return n;
+  }
+
   function leave() {
     stopLoop();
     try { if (S.peer) S.peer.destroy(); } catch (e) { }
@@ -6547,10 +6594,7 @@ var Net = (function () {
           dropConn(dead);                            // молчит слишком долго — считаем, что ушёл
         }
       }
-      for (i = 1; i < S.conns.length; i++) {
-        c = S.conns[i];
-        if (c && c.away && now >= c.away) seatBot(i);
-      }
+      /* бота по таймеру больше не сажаем: решает хозяин кнопкой */
       return;
     }
     var h = S.conns && S.conns[0];
@@ -6576,7 +6620,7 @@ var Net = (function () {
     setBroker: setBroker, testBroker: testBroker,
     myUid: myUid, setUid: setUid, newUid: newUid,
     saveHost: saveHost, savedHost: savedHost, dropSaved: dropSaved, updateMe: updateMe,
-    closeTable: closeTable,
+    closeTable: closeTable, postpone: postpone, holdHumans: holdHumans,
     savedBack: savedBack, dropBack: dropBack,
     chat: chat,
     loadPeer: loadPeer, PREFIX: PREFIX, send: send,
@@ -8936,7 +8980,8 @@ var UI = (function () {
     }
     var now = Date.now(), i;
     awayTill = {};
-    for (i = 0; i < awayWho.length; i++) awayTill[awayWho[i].seat] = now + Math.max(0, awayWho[i].left || 0);
+    /* время считаем ВПЕРЁД, от обрыва: бот сам не сядет, обратный отсчёт врал бы */
+    for (i = 0; i < awayWho.length; i++) awayTill[awayWho[i].seat] = now - Math.max(0, awayWho[i].since || 0);
     netHoldOn(true);
     var host = !!(typeof Net !== 'undefined' && Net.S && Net.S.host);
     function draw() {
@@ -8949,12 +8994,15 @@ var UI = (function () {
           rows.push('<b>' + esc(awayWho[k].name) + '</b> — ждём ' + waited + ' сек');
           continue;
         }
-        var left = Math.max(0, Math.ceil((awayTill[st] - t) / 1000));
-        rows.push('<b>' + esc(awayWho[k].name) + '</b> — ' + left + ' сек' +
+        var sec = Math.max(0, Math.floor((t - awayTill[st]) / 1000));
+        var mmss = sec < 60 ? (sec + ' сек')
+          : (Math.floor(sec / 60) + ':' + ('0' + (sec % 60)).slice(-2));
+        rows.push('<b>' + esc(awayWho[k].name) + '</b> — нет ' + mmss +
           (host ? ' <button class="btn tiny" data-awbot="' + st + '">Посадить бота</button>' : ''));
       }
       box.className = 'on';
-      box.innerHTML = '<div class="awin"><span class="awh">Партия на паузе: ждём игрока</span>' + rows.join(' · ') + '</div>';
+      box.innerHTML = '<div class="awin"><span class="awh">Партия на паузе: ждём игрока</span>' + rows.join(' · ') +
+        (host ? '' : '<span class="awh2">Стол ждёт, пока он вернётся.</span>') + '</div>';
     }
     draw();
     awayT = setInterval(draw, 500);
@@ -10950,7 +10998,7 @@ var Boot = (function () {
   var SYS_LIST = [['std', '«Сириус»'], ['prec', '«Прецизион»'], ['mix', 'Вперемешку']];
   function oppSysNow() { return CFG.oppSys === 'mix' ? (Math.random() < 0.5 ? 'std' : 'prec') : (CFG.oppSys === 'prec' ? 'prec' : 'std'); }
   var game = null, brains = [];
-  var BUILD = '20.10 21:08';        // подставляет build.py — чтобы было видно, какая версия открыта
+  var BUILD = '22.10 13:17';        // подставляет build.py — чтобы было видно, какая версия открыта
 
   function load() {
     try {
@@ -12610,8 +12658,8 @@ var Boot = (function () {
       '<button class="btn" data-m="profile">Профиль</button>' +
       '<button class="btn" data-m="rules">Правила</button>' +
       '</div>' +
-      (host ? '<div class="row"><button class="btn wide" data-m="rehost">Поднять прежний стол ' +
-        host.code + '</button></div>' : '') +
+      (host ? '<div class="row"><button class="btn wide" data-m="rehost">Продолжить отложенную партию — стол ' +
+        host.code + (host.game && host.game.handNo ? ', сдача ' + host.game.handNo : '') + '</button></div>' : '') +
       (back && !host ? '<div class="row"><button class="btn wide" data-m="back">Вернуться за стол ' +
         esc(back.code) + ' — место ' + (back.seat + 1) + '</button></div>' : '') +
       '<div class="foot"><span class="sub build">сборка ' + BUILD + '</span>' +
@@ -13333,7 +13381,10 @@ var Boot = (function () {
       '<button class="btn" data-m="profile">Профиль</button>' +
       '<button class="btn" data-m="rules">Правила</button>' +
       '<button class="btn" data-m="cfg">Правила этой партии</button>' +
-      '<button class="btn" data-m="quit">Выйти в главное меню</button>' +
+      (net && Net.S.host
+        ? '<button class="btn" data-m="later">Отложить партию — доиграем потом</button>' +
+          '<button class="btn" data-m="end">Закончить партию и закрыть стол</button>'
+        : '<button class="btn" data-m="quit">Выйти в главное меню</button>') +
       '</div>' +
       (net ? '<div class="sub" style="margin-top:12px">Стол <b>' + Net.S.code + '</b>' + UI.copyHTML(Net.S.code, 'inline') +
         (Net.S.host ? ' — вы хозяин.' : ', ваш ключ места <b>' + Net.S.key + '</b>' + UI.copyHTML(Net.S.key, 'inline')) + '</div>' : '') +
@@ -13350,6 +13401,15 @@ var Boot = (function () {
         if (v === 'profile') return go(scrProfile);
         if (v === 'cfg') return dlgSettings('game', scrPause);
         if (v === 'rules') return dlgRules();
+        if (v === 'later') {
+          Net.postpone(); netBtn();
+          UI.toast('Партия отложена. Продолжить — в главном меню');
+          return mainMenu();
+        }
+        if (v === 'end') {
+          try { Net.closeTable('Хозяин закончил партию — стол закрыт.'); } catch (e) { }
+          netBtn(); return mainMenu();
+        }
         if (v === 'quit') {
           if (window.Tour && Tour.S.on) { Tour.leave(); return mainMenu(); }
           if (Net.S.on) { Net.leave(); netBtn(); }
@@ -13397,12 +13457,15 @@ var Boot = (function () {
         game.chars = d.chars || game.chars || [];
         game.faces = d.faces || game.faces || [];
         brains = [];
-        for (var i = 0; i < game.N; i++)
-          brains.push(i === 0 ? null : new Bots.Brain(game, i, CFG.level));
+        for (var i = 0; i < game.N; i++) {
+          var wasBot = i !== 0 && (!d.conns[i] || d.conns[i].bot === undefined || d.conns[i].bot);
+          brains.push(wasBot ? new Bots.Brain(game, i, CFG.level) : null);
+        }
         Talk.reset();
         UI.setSpeed(CFG.speed);
         UI.attach(game, brains, 0);
         Net.startGame(game);
+        Net.holdHumans();                      // люди с прошлого раза — ждём их, ботов не сажаем
         closeAll(); netBtn(); talkBtn();
         UI.netEvents([]);
         UI.toast('Стол ' + d.code + ' поднят. Игроки входят по своим ключам');
